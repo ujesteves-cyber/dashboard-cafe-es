@@ -9,6 +9,7 @@ import GaugeIA from './components/GaugeIA';
 import AlertsPanel from './components/AlertsPanel';
 import ExportChart from './components/ExportChart';
 import FuturesPanel from './components/FuturesPanel';
+import NewsPanel from './components/NewsPanel';
 
 function Header({ ultimaAtualizacao, onRefresh, loading, onLogout }) {
   return (
@@ -42,7 +43,7 @@ function Header({ ultimaAtualizacao, onRefresh, loading, onLogout }) {
           {ultimaAtualizacao && (
             <span className="text-xs text-text-secondary flex items-center gap-1">
               <Calendar className="w-3 h-3" />
-              {new Date(ultimaAtualizacao).toLocaleString('pt-BR')}
+              {ultimaAtualizacao}
             </span>
           )}
 
@@ -60,6 +61,16 @@ function Header({ ultimaAtualizacao, onRefresh, loading, onLogout }) {
   );
 }
 
+function formatBRT(isoString) {
+  if (!isoString) return '';
+  try {
+    const d = new Date(isoString);
+    return d.toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' });
+  } catch {
+    return isoString;
+  }
+}
+
 export default function App() {
   const [isLoggedIn, setIsLoggedIn] = useState(false);
   const [loginError, setLoginError] = useState(null);
@@ -71,6 +82,7 @@ export default function App() {
   const [exportacoes, setExportacoes] = useState(null);
   const [analiseIA, setAnaliseIA] = useState(null);
   const [alertas, setAlertas] = useState(null);
+  const [noticias, setNoticias] = useState(null);
   const [futuros, setFuturos] = useState(null);
   const [loading, setLoading] = useState(true);
   const [loadingIA, setLoadingIA] = useState(false);
@@ -101,6 +113,7 @@ export default function App() {
     setExportacoes(null);
     setAnaliseIA(null);
     setAlertas(null);
+    setNoticias(null);
     setFuturos(null);
   };
 
@@ -108,13 +121,14 @@ export default function App() {
     setLoading(true);
     setError(null);
     try {
-      const [cot, hist, prod, exp, ia, alt, fut] = await Promise.all([
+      const [cot, hist, prod, exp, ia, alt, news, fut] = await Promise.all([
         api.cotacoes(),
         api.historico(),
         api.producao(),
         api.exportacoes(),
         api.analiseIA(),
         api.alertas(),
+        api.noticias(),
         api.futuros(),
       ]);
       setCotacoes(cot);
@@ -123,6 +137,7 @@ export default function App() {
       setExportacoes(exp);
       setAnaliseIA(ia);
       setAlertas(alt);
+      setNoticias(news);
       setFuturos(fut);
     } catch (err) {
       setError(err.message);
@@ -176,7 +191,7 @@ export default function App() {
   return (
     <div className="min-h-screen">
       <Header
-        ultimaAtualizacao={cotacoes?.atualizado_em}
+        ultimaAtualizacao={formatBRT(cotacoes?.atualizado_em)}
         onRefresh={fetchAll}
         loading={loading}
         onLogout={handleLogout}
@@ -247,26 +262,29 @@ export default function App() {
         {/* Linha 2 — Futuros B3 e NY */}
         <FuturesPanel data={futuros} />
 
-        {/* Linha 3 — Gráficos Principais */}
+        {/* Linha 3 — Notícias do Mercado */}
+        <NewsPanel data={noticias} />
+
+        {/* Linha 4 — Gráficos Principais */}
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
           <PriceChart data={historico} />
           <ProductionChart data={producao} />
         </div>
 
-        {/* Linha 3 — IA + Alertas */}
+        {/* Linha 5 — IA + Alertas */}
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
           <GaugeIA analise={analiseIA} onRefresh={refreshIA} loading={loadingIA} />
           <AlertsPanel data={alertas} />
         </div>
 
-        {/* Linha 4 — Exportações */}
+        {/* Linha 6 — Exportações */}
         <ExportChart data={exportacoes} />
       </main>
 
       <footer className="border-t border-white/5 px-6 py-4 mt-6">
         <div className="max-w-7xl mx-auto flex flex-col sm:flex-row items-center justify-between gap-2 text-xs text-text-secondary">
           <span>Dashboard Café ES · Dados real-time para fins informativos</span>
-          <span>Fontes: CCCV Vitória · CEPEA/Esalq · ICE London · NYBOT · BCB PTAX · CONAB</span>
+          <span>Fontes: CCCV Vitória · CEPEA/Esalq · ICE London · NYBOT · BCB PTAX · CONAB · Notícias Agrícolas</span>
         </div>
       </footer>
     </div>

@@ -1,4 +1,4 @@
-import { Brain, RefreshCw } from 'lucide-react';
+import { Brain, RefreshCw, Sparkles } from 'lucide-react';
 
 const RECOMENDACOES = {
   VENDA_FORTE: { label: 'Venda Forte', angle: -72, color: '#dc2626' },
@@ -21,21 +21,31 @@ export default function GaugeIA({ analise, onRefresh, loading }) {
   if (!analise) return null;
 
   const rec = RECOMENDACOES[analise.recomendacao] || RECOMENDACOES.NEUTRO;
+  const isClaudeAI = analise.fonte && analise.fonte.toLowerCase().includes('claude');
 
   return (
     <div className="bg-bg-card rounded-xl p-5 border border-white/5">
       <div className="flex items-center justify-between mb-4">
         <div className="flex items-center gap-2">
           <Brain className="w-5 h-5 text-purple-400" />
-          <h3 className="text-lg font-semibold text-text-primary">
-            Termômetro do Mercado
-          </h3>
+          <div>
+            <h3 className="text-lg font-semibold text-text-primary">
+              Análise IA do Mercado
+            </h3>
+            <p className="text-xs text-text-secondary flex items-center gap-1">
+              <Sparkles className="w-3 h-3 text-purple-400" />
+              {isClaudeAI
+                ? 'Claude AI compilando cotações, futuros e notícias'
+                : 'Análise baseada em dados de mercado'
+              }
+            </p>
+          </div>
         </div>
         <button
           onClick={onRefresh}
           disabled={loading}
           className="p-2 rounded-lg hover:bg-white/5 transition-colors disabled:opacity-50"
-          title="Atualizar análise"
+          title="Atualizar análise IA"
         >
           <RefreshCw className={`w-4 h-4 text-text-secondary ${loading ? 'animate-spin' : ''}`} />
         </button>
@@ -89,9 +99,9 @@ export default function GaugeIA({ analise, onRefresh, loading }) {
             className="px-2.5 py-1 rounded-full text-xs font-medium bg-white/5 border border-white/10 text-text-secondary"
           >
             {f.nome}: <span className={
-              f.sinal === 'alta' || f.sinal === 'favorável' || f.sinal === 'firme' || f.sinal === 'baixos'
+              f.sinal === 'alta' || f.sinal === 'favorável' || f.sinal === 'firme' || f.sinal === 'baixos' || f.sinal === 'otimista'
                 ? 'text-positive'
-                : f.sinal === 'baixa' || f.sinal === 'desfavorável' || f.sinal === 'fraco' || f.sinal === 'altos'
+                : f.sinal === 'baixa' || f.sinal === 'desfavorável' || f.sinal === 'fraco' || f.sinal === 'altos' || f.sinal === 'pessimista'
                   ? 'text-negative'
                   : 'text-accent'
             }>{f.sinal}</span>
@@ -117,9 +127,17 @@ export default function GaugeIA({ analise, onRefresh, loading }) {
       </div>
 
       {/* Timestamp */}
-      <div className="mt-3 text-xs text-text-secondary text-right">
-        {analise.fonte === 'claude-api' ? '🤖 Claude API' : '📊 Dados simulados'}
-        {analise.atualizado_em && ` · ${new Date(analise.atualizado_em).toLocaleString('pt-BR')}`}
+      <div className="mt-3 pt-3 border-t border-white/5 flex items-center justify-between text-xs text-text-secondary">
+        <span className="flex items-center gap-1">
+          {isClaudeAI ? (
+            <><Sparkles className="w-3 h-3 text-purple-400" /> Claude AI</>
+          ) : (
+            <><Brain className="w-3 h-3" /> Dados calculados</>
+          )}
+        </span>
+        {analise.atualizado_em && (
+          <span>{new Date(analise.atualizado_em).toLocaleString('pt-BR')}</span>
+        )}
       </div>
     </div>
   );

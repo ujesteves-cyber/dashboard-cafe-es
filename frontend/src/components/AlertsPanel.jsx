@@ -1,4 +1,4 @@
-import { AlertTriangle, Newspaper, TrendingUp, DollarSign, Cloud } from 'lucide-react';
+import { AlertTriangle, TrendingUp, DollarSign, Cloud } from 'lucide-react';
 
 const SEVERITY_STYLES = {
   alta: 'border-l-negative bg-negative/5',
@@ -19,11 +19,11 @@ export default function AlertsPanel({ data }) {
     <div className="bg-bg-card rounded-xl p-5 border border-white/5">
       <h3 className="text-lg font-semibold text-text-primary mb-4 flex items-center gap-2">
         <AlertTriangle className="w-5 h-5 text-accent" />
-        Alertas & Notícias
+        Alertas do Mercado
       </h3>
 
       {/* Alertas */}
-      <div className="space-y-2 mb-5">
+      <div className="space-y-2">
         {data.alertas?.map((alerta, i) => {
           const Icon = TIPO_ICONS[alerta.tipo] || AlertTriangle;
           return (
@@ -41,22 +41,6 @@ export default function AlertsPanel({ data }) {
             </div>
           );
         })}
-      </div>
-
-      {/* Notícias */}
-      <h4 className="text-sm font-semibold text-text-secondary mb-3 flex items-center gap-2">
-        <Newspaper className="w-4 h-4" />
-        Notícias Recentes
-      </h4>
-      <div className="space-y-3">
-        {data.noticias?.map((noticia, i) => (
-          <div key={i} className="border-b border-white/5 pb-2 last:border-0">
-            <p className="text-sm text-text-primary">{noticia.titulo}</p>
-            <p className="text-xs text-text-secondary mt-1">
-              {noticia.fonte} · {noticia.data}
-            </p>
-          </div>
-        ))}
       </div>
     </div>
   );

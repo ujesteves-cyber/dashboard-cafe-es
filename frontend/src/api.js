@@ -13,6 +13,7 @@ export const api = {
   exportacoes: () => fetchJSON('/exportacoes'),
   analiseIA: () => fetchJSON('/analise-ia'),
   alertas: () => fetchJSON('/alertas'),
+  noticias: () => fetchJSON('/noticias'),
   futuros: () => fetchJSON('/futuros'),
   login: (username, password) =>
     fetch(`${BASE}/login`, {

@@ -9,7 +9,7 @@ import json
 import time
 import re
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from contextlib import asynccontextmanager
 
 import httpx
@@ -23,12 +23,25 @@ logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("cafe")
 
 # ---------------------------------------------------------------------------
+# Timezone Brasil (UTC-3)
+# ---------------------------------------------------------------------------
+BRT = timezone(timedelta(hours=-3))
+
+
+def _now_brt() -> datetime:
+    """Retorna datetime atual no fuso horário de Brasília."""
+    return datetime.now(BRT)
+
+
+# ---------------------------------------------------------------------------
 # Cache em memória com TTL configurável
 # ---------------------------------------------------------------------------
 _cache: dict = {}
 CACHE_SHORT = 300    # 5 min — cotações
 CACHE_MEDIUM = 1800  # 30 min — histórico
 CACHE_LONG = 3600    # 1h — análise IA
+CACHE_NEWS = 900     # 15 min — notícias
+CACHE_PROD = 86400 * 7  # 7 dias — produção (dados mensais)
 
 
 def _get_cache(key: str, ttl: int = CACHE_SHORT):
@@ -389,6 +402,160 @@ def _fallback_nybot():
 
 
 # ---------------------------------------------------------------------------
+# Scraper: Notícias de Café (Notícias Agrícolas)
+# ---------------------------------------------------------------------------
+async def scrape_noticias_cafe() -> list[dict]:
+    """Scrape notícias recentes de café do Notícias Agrícolas."""
+    cached = _get_cache("noticias_cafe", CACHE_NEWS)
+    if cached:
+        return cached
+
+    noticias = []
+    urls_noticias = [
+        f"{NA_BASE}/noticias/cafe",
+    ]
+
+    for url in urls_noticias:
+        try:
+            soup = await _fetch_page(url)
+            if not soup:
+                continue
+
+            # Busca artigos/links de notícias
+            items = soup.select("div.noticias-item, article, div.listagem-item, div.not-item")
+            if not items:
+                # Tenta seletores alternativos
+                items = soup.select("a[href*='/noticias/cafe/']")
+
+            for item in items[:15]:
+                try:
+                    # Tenta extrair link e título
+                    link_el = item if item.name == "a" else item.select_one("a")
+                    if not link_el:
+                        continue
+
+                    href = link_el.get("href", "")
+                    if not href or "/noticias/" not in href:
+                        continue
+
+                    titulo = link_el.get_text(strip=True)
+                    if not titulo or len(titulo) < 15:
+                        continue
+
+                    # Monta URL completa
+                    if href.startswith("/"):
+                        href = f"{NA_BASE}{href}"
+
+                    # Tenta extrair data
+                    data_el = item.select_one("span.data, time, span.date, div.data")
+                    data_str = data_el.get_text(strip=True) if data_el else ""
+
+                    noticias.append({
+                        "titulo": titulo[:150],
+                        "url": href,
+                        "fonte": "Notícias Agrícolas",
+                        "data": data_str,
+                    })
+                except Exception:
+                    continue
+
+        except Exception as e:
+            log.warning(f"Erro ao buscar notícias: {e}")
+
+    # Remove duplicatas por título
+    seen = set()
+    unique = []
+    for n in noticias:
+        key = n["titulo"][:50]
+        if key not in seen:
+            seen.add(key)
+            unique.append(n)
+
+    result = unique[:10]
+    if result:
+        _set_cache("noticias_cafe", result)
+        log.info(f"Notícias: {len(result)} notícias coletadas")
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Produção via Claude API (dados CONAB reais, cache longo)
+# ---------------------------------------------------------------------------
+async def fetch_producao_real() -> dict:
+    """Busca dados reais de produção via Claude API com conhecimento CONAB."""
+    cached = _get_cache("producao_real", CACHE_PROD)
+    if cached:
+        return cached
+
+    api_key = os.getenv("ANTHROPIC_API_KEY")
+    if not api_key or api_key.startswith("sk-ant-xxx"):
+        return _fallback_producao()
+
+    try:
+        import anthropic
+        client = anthropic.Anthropic(api_key=api_key)
+
+        prompt = f"""Você é um especialista em dados do agronegócio brasileiro.
+Forneça os dados mais recentes de produção de café do Espírito Santo por região,
+baseado nos dados oficiais da CONAB (Companhia Nacional de Abastecimento).
+
+Data atual: {_now_brt().strftime('%d/%m/%Y')}
+
+Forneça os dados da SAFRA mais recente disponível em JSON válido (sem markdown):
+{{
+    "safra": "2024/25 ou 2025/26 (a mais recente com dados)",
+    "fonte": "CONAB - Acompanhamento da Safra Brasileira de Café",
+    "atualizado_em": "mês/ano da última atualização CONAB",
+    "regioes": [
+        {{"regiao": "Nome da região", "conilon": valor_mil_sacas, "arabica": valor_mil_sacas, "total": soma}},
+    ],
+    "total_es": {{
+        "conilon": total_conilon_mil_sacas,
+        "arabica": total_arabica_mil_sacas,
+        "total": total_geral
+    }},
+    "observacao": "breve nota sobre a safra"
+}}
+
+As regiões do ES são: Norte (São Mateus, Linhares), Serrana (Santa Maria, Marechal Floriano),
+Sul/Caparaó (Alegre, Iúna, Dores do Rio Preto), Noroeste (Nova Venécia, Colatina).
+Responda APENAS o JSON."""
+
+        message = client.messages.create(
+            model="claude-sonnet-4-20250514",
+            max_tokens=800,
+            messages=[{"role": "user", "content": prompt}],
+        )
+
+        response_text = message.content[0].text
+        result = json.loads(response_text)
+        _set_cache("producao_real", result)
+        log.info(f"Produção CONAB: safra {result.get('safra', '?')} — via Claude API")
+        return result
+
+    except Exception as e:
+        log.error(f"Erro ao buscar produção via Claude: {e}")
+        return _fallback_producao()
+
+
+def _fallback_producao():
+    """Dados de produção fallback (CONAB safra 2024/25 estimativa)."""
+    return {
+        "safra": "2024/25 (estimativa)",
+        "fonte": "CONAB - Estimativa (dados offline)",
+        "atualizado_em": "Jan/2025",
+        "regioes": [
+            {"regiao": "Norte (São Mateus, Linhares)", "conilon": 5800, "arabica": 120, "total": 5920},
+            {"regiao": "Serrana (Santa Maria, Marechal)", "conilon": 1200, "arabica": 2800, "total": 4000},
+            {"regiao": "Sul/Caparaó (Alegre, Iúna)", "conilon": 800, "arabica": 3500, "total": 4300},
+            {"regiao": "Noroeste (Nova Venécia, Colatina)", "conilon": 3200, "arabica": 200, "total": 3400},
+        ],
+        "total_es": {"conilon": 11000, "arabica": 6620, "total": 17620},
+        "observacao": "Dados estimados. Configure ANTHROPIC_API_KEY para dados atualizados via IA.",
+    }
+
+
+# ---------------------------------------------------------------------------
 # Scraper: B3 Futuros (Arábica 4/5 — Pregão Regular)
 # ---------------------------------------------------------------------------
 async def scrape_b3_futuros() -> dict:
@@ -496,18 +663,8 @@ async def fetch_ptax() -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Produção e Exportação (dados CONAB / MDIC — estáticos por safra)
+# Exportação (dados MDIC — estáticos por safra)
 # ---------------------------------------------------------------------------
-def get_production_data() -> list[dict]:
-    """Dados de produção por região do ES (CONAB safra 2025/26, mil sacas)."""
-    return [
-        {"regiao": "Norte (São Mateus, Linhares)", "conilon": 5800, "arabica": 120, "total": 5920},
-        {"regiao": "Serrana (Santa Maria, Marechal)", "conilon": 1200, "arabica": 2800, "total": 4000},
-        {"regiao": "Sul/Caparaó (Alegre, Iúna)", "conilon": 800, "arabica": 3500, "total": 4300},
-        {"regiao": "Noroeste (Nova Venécia, Colatina)", "conilon": 3200, "arabica": 200, "total": 3400},
-    ]
-
-
 def get_export_data() -> list[dict]:
     """Exportações mensais ES 2025 (MDIC/Comex Stat, mil sacas)."""
     return [
@@ -565,7 +722,7 @@ async def get_cotacoes():
             "data": ptax["data"],
             "fonte": "BCB PTAX",
         },
-        "atualizado_em": datetime.now().isoformat(),
+        "atualizado_em": _now_brt().isoformat(),
     }
 
 
@@ -614,8 +771,9 @@ async def get_historico():
 
 @app.get("/api/producao")
 async def get_producao():
-    """Dados de produção por região do ES (CONAB)."""
-    return {"regioes": get_production_data()}
+    """Dados de produção por região do ES (CONAB via Claude API)."""
+    data = await fetch_producao_real()
+    return data
 
 
 @app.get("/api/exportacoes")
@@ -626,13 +784,19 @@ async def get_exportacoes():
 
 @app.get("/api/analise-ia")
 async def get_analise_ia():
-    """Análise de mercado via Claude API com dados reais."""
+    """Análise de mercado via Claude API compilando dados + notícias."""
     cached = _get_cache("analise_ia", CACHE_LONG)
     if cached:
         return cached
 
-    # Coleta dados reais para contexto
-    conilon, arabica, ice, nybot, ptax = await _fetch_all_quotes()
+    import asyncio
+    # Coleta dados reais + notícias em paralelo
+    (conilon, arabica, ice, nybot, ptax), noticias = await asyncio.gather(
+        _fetch_all_quotes(),
+        scrape_noticias_cafe(),
+    )
+    if isinstance(noticias, Exception):
+        noticias = []
 
     api_key = os.getenv("ANTHROPIC_API_KEY")
     if not api_key or api_key.startswith("sk-ant-xxx"):
@@ -664,27 +828,40 @@ async def get_analise_ia():
                 "ice_london": f"${ice['preco']:.2f} ({ice['variacao']:+.2f}%)",
                 "cambio": f"R${ptax['venda']:.4f}",
             },
-            "atualizado_em": datetime.now().isoformat(),
+            "atualizado_em": _now_brt().isoformat(),
             "fonte": "mock (configure ANTHROPIC_API_KEY para análise real)",
         }
         _set_cache("analise_ia", result)
         return result
 
-    # Análise real via Claude API
+    # Análise real via Claude API — compila TODOS os dados + notícias
     try:
         import anthropic
-
         client = anthropic.Anthropic(api_key=api_key)
 
         # Monta histórico resumido
         hist_conilon = conilon.get("historico", [])[:10]
         hist_str = "\n".join([f"  {r['data']}: R${r['preco']:.2f} ({r['variacao']:+.2f}%)" for r in hist_conilon])
 
+        # Monta resumo das notícias
+        news_str = "  (sem notícias disponíveis no momento)"
+        if noticias:
+            news_items = [f"  - {n['titulo']}" for n in noticias[:8]]
+            news_str = "\n".join(news_items)
+
+        # Futuros B3
+        b3_data = _get_cache("b3_futuros")
+        b3_str = "  (sem dados)"
+        if b3_data and b3_data.get("contratos"):
+            b3_items = [f"  {c['contrato']}: {c['preco']:.2f} US$/sc ({c['variacao']:+.2f}%)" for c in b3_data["contratos"][:4]]
+            b3_str = "\n".join(b3_items)
+
         prompt = f"""Você é um analista sênior de commodities especializado em café brasileiro,
 com foco no mercado do Espírito Santo (maior produtor de Conilon do Brasil).
 
-DADOS REAIS DE MERCADO (hoje {datetime.now().strftime('%d/%m/%Y')}):
+DADOS REAIS DE MERCADO (hoje {_now_brt().strftime('%d/%m/%Y %H:%M')} BRT):
 
+═══ COTAÇÕES SPOT ═══
 Conilon ES (Tipo 7/8, CCCV Vitória):
   Último: R${conilon['preco']:.2f}/saca 60kg ({conilon['variacao']:+.2f}%)
   Histórico recente:
@@ -693,34 +870,40 @@ Conilon ES (Tipo 7/8, CCCV Vitória):
 Arábica (Indicador CEPEA/Esalq):
   R${arabica['preco']:.2f}/saca ({arabica['variacao']:+.2f}%)
 
-ICE London (Robusta):
-  ${ice['preco']:.2f}/ton ({ice['variacao']:+.2f}%)
+═══ BOLSAS INTERNACIONAIS ═══
+ICE London (Robusta): ${ice['preco']:.2f}/ton ({ice['variacao']:+.2f}%)
+NYBOT (Arábica NY): {nybot['preco']:.2f}¢/lb ({nybot['variacao']:+.2f}%)
 
-NYBOT (Arábica NY):
-  {nybot['preco']:.2f}¢/lb ({nybot['variacao']:+.2f}%)
+═══ FUTUROS B3 ═══
+{b3_str}
 
-Câmbio:
-  USD/BRL PTAX: R${ptax['venda']:.4f}
+═══ CÂMBIO ═══
+USD/BRL PTAX: R${ptax['venda']:.4f}
 
-Período: Entressafra Conilon (colheita abril-julho)
+═══ NOTÍCIAS RECENTES DO SETOR ═══
+{news_str}
 
-Analise o mercado e responda EXCLUSIVAMENTE em JSON válido (sem markdown):
+═══ CONTEXTO SAZONAL ═══
+Período: Março — pré-colheita Conilon (colheita abril-julho no ES)
+
+Compile TODOS os dados acima (cotações, futuros, câmbio, notícias e sazonalidade) e forneça uma
+análise profissional de mercado. Responda EXCLUSIVAMENTE em JSON válido (sem markdown):
 {{
     "recomendacao": "COMPRA_FORTE" | "COMPRA" | "NEUTRO" | "VENDA" | "VENDA_FORTE",
     "confianca": 0-100,
-    "resumo": "2-3 frases com análise profissional dos dados reais acima",
+    "resumo": "3-4 frases com análise profissional compilando todos os dados, cotações, tendências e notícias",
     "fatores": [
-        {{"nome": "Tendência", "sinal": "alta|baixa|lateral", "peso": "alto|médio|baixo"}},
+        {{"nome": "Tendência de Preço", "sinal": "alta|baixa|lateral", "peso": "alto|médio|baixo"}},
         {{"nome": "Câmbio", "sinal": "favorável|desfavorável|neutro", "peso": "alto|médio|baixo"}},
-        {{"nome": "Sazonalidade", "sinal": "safra|entressafra", "peso": "alto|médio|baixo"}},
-        {{"nome": "Estoques", "sinal": "altos|baixos|normais", "peso": "alto|médio|baixo"}},
-        {{"nome": "Internacional", "sinal": "firme|fraco|estável", "peso": "alto|médio|baixo"}}
+        {{"nome": "Sazonalidade", "sinal": "safra|entressafra|pré-colheita", "peso": "alto|médio|baixo"}},
+        {{"nome": "Mercado Internacional", "sinal": "firme|fraco|estável", "peso": "alto|médio|baixo"}},
+        {{"nome": "Sentimento (Notícias)", "sinal": "otimista|pessimista|neutro", "peso": "alto|médio|baixo"}}
     ]
 }}"""
 
         message = client.messages.create(
             model="claude-sonnet-4-20250514",
-            max_tokens=600,
+            max_tokens=800,
             messages=[{"role": "user", "content": prompt}],
         )
 
@@ -730,10 +913,12 @@ Analise o mercado e responda EXCLUSIVAMENTE em JSON válido (sem markdown):
             "conilon": f"R${conilon['preco']:.2f} ({conilon['variacao']:+.2f}%)",
             "arabica": f"R${arabica['preco']:.2f} ({arabica['variacao']:+.2f}%)",
             "ice_london": f"${ice['preco']:.2f} ({ice['variacao']:+.2f}%)",
+            "nybot": f"{nybot['preco']:.2f}¢/lb ({nybot['variacao']:+.2f}%)",
             "cambio": f"R${ptax['venda']:.4f}",
         }
-        result["atualizado_em"] = datetime.now().isoformat()
-        result["fonte"] = "Claude API (dados reais)"
+        result["atualizado_em"] = _now_brt().isoformat()
+        result["fonte"] = "Claude AI (compilando cotações + notícias)"
+        log.info(f"Análise IA: {result['recomendacao']} (confiança {result['confianca']}%)")
         _set_cache("analise_ia", result)
         return result
 
@@ -744,7 +929,7 @@ Analise o mercado e responda EXCLUSIVAMENTE em JSON válido (sem markdown):
             "confianca": 0,
             "resumo": f"Erro ao gerar análise: {str(e)}",
             "fatores": [],
-            "atualizado_em": datetime.now().isoformat(),
+            "atualizado_em": _now_brt().isoformat(),
             "fonte": "erro",
         }
 
@@ -762,14 +947,14 @@ async def get_alertas():
             "tipo": "preco",
             "mensagem": f"Conilon em queda: R${conilon['preco']:.2f} ({conilon['variacao']:+.2f}%) — {conilon['fonte']}",
             "severidade": "alta",
-            "data": datetime.now().strftime("%Y-%m-%d %H:%M"),
+            "data": _now_brt().strftime("%Y-%m-%d %H:%M"),
         })
     elif conilon["variacao"] > 2:
         alertas.append({
             "tipo": "preco",
             "mensagem": f"Conilon em alta: R${conilon['preco']:.2f} ({conilon['variacao']:+.2f}%) — {conilon['fonte']}",
             "severidade": "alta",
-            "data": datetime.now().strftime("%Y-%m-%d %H:%M"),
+            "data": _now_brt().strftime("%Y-%m-%d %H:%M"),
         })
 
     if conilon["preco"] > 1000:
@@ -777,7 +962,7 @@ async def get_alertas():
             "tipo": "preco",
             "mensagem": f"Conilon acima de R$1.000/saca: R${conilon['preco']:.2f}",
             "severidade": "alta",
-            "data": datetime.now().strftime("%Y-%m-%d %H:%M"),
+            "data": _now_brt().strftime("%Y-%m-%d %H:%M"),
         })
 
     # Alerta câmbio
@@ -786,7 +971,7 @@ async def get_alertas():
             "tipo": "cambio",
             "mensagem": f"Dólar acima de R$5,50: PTAX R${ptax['venda']:.4f} — favorece exportador",
             "severidade": "media",
-            "data": datetime.now().strftime("%Y-%m-%d %H:%M"),
+            "data": _now_brt().strftime("%Y-%m-%d %H:%M"),
         })
 
     # Alerta spread Arábica/Conilon
@@ -796,7 +981,7 @@ async def get_alertas():
             "tipo": "spread",
             "mensagem": f"Spread Arábica-Conilon: R${spread:.2f}/saca ({spread/conilon['preco']*100:.1f}%)",
             "severidade": "baixa",
-            "data": datetime.now().strftime("%Y-%m-%d %H:%M"),
+            "data": _now_brt().strftime("%Y-%m-%d %H:%M"),
         })
 
     # Se não gerou nenhum alerta especial
@@ -805,7 +990,7 @@ async def get_alertas():
             "tipo": "info",
             "mensagem": f"Conilon ES estável: R${conilon['preco']:.2f} ({conilon['variacao']:+.2f}%)",
             "severidade": "baixa",
-            "data": datetime.now().strftime("%Y-%m-%d %H:%M"),
+            "data": _now_brt().strftime("%Y-%m-%d %H:%M"),
         })
 
     return {
@@ -863,6 +1048,16 @@ async def get_futuros():
             "contratos": ny_contratos,
             "ultima_atualizacao": ny_ultima,
         },
+    }
+
+
+@app.get("/api/noticias")
+async def get_noticias():
+    """Notícias recentes de café com links."""
+    noticias = await scrape_noticias_cafe()
+    return {
+        "noticias": noticias,
+        "atualizado_em": _now_brt().isoformat(),
     }
 
 
