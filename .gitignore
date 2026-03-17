@@ -1,2 +1,10 @@
 .claude/
 docs/
+node_modules/
+frontend/node_modules/
+frontend/dist/
+backend/__pycache__/
+backend/.env
+.env
+*.pyc
+.vite/
